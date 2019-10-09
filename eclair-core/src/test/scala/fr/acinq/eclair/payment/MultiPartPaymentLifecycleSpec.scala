@@ -31,8 +31,7 @@ import fr.acinq.eclair.payment.PaymentInitiator.{SendPaymentConfig, SendPaymentR
 import fr.acinq.eclair.payment.PaymentLifecycle.SendPayment
 import fr.acinq.eclair.payment.PaymentSent.PartialPayment
 import fr.acinq.eclair.router._
-import fr.acinq.eclair.wire.Onion.createMultiPartPayload
-import fr.acinq.eclair.wire.{ChannelUpdate, PaymentTimeout}
+import fr.acinq.eclair.wire.{ChannelUpdate, Onion, PaymentTimeout}
 import org.scalatest.{Outcome, Tag, fixture}
 
 import scala.concurrent.duration._
@@ -127,8 +126,8 @@ class MultiPartPaymentLifecycleSpec extends TestKit(ActorSystem("test")) with fi
 
     // The payment should be split in two, using direct channels with b.
     childPayFsm.expectMsgAllOf(
-      SendPayment(paymentHash, b, createMultiPartPayload(1000 * 1000 msat, payment.amount, CltvExpiry(defaultBlockHeight + 1 + 9), pr.paymentSecret.get), 1, routePrefix = Seq(Hop(nodeParams.nodeId, b, channelUpdate_ab_1))),
-      SendPayment(paymentHash, b, createMultiPartPayload(1000 * 1000 msat, payment.amount, CltvExpiry(defaultBlockHeight + 1 + 9), pr.paymentSecret.get), 1, routePrefix = Seq(Hop(nodeParams.nodeId, b, channelUpdate_ab_2)))
+      SendPayment(paymentHash, b, Onion.createMultiPartPayload(1000 * 1000 msat, payment.amount, CltvExpiry(defaultBlockHeight + 1 + 9), pr.paymentSecret.get), 1, routePrefix = Seq(ChannelHop(nodeParams.nodeId, b, channelUpdate_ab_1))),
+      SendPayment(paymentHash, b, Onion.createMultiPartPayload(1000 * 1000 msat, payment.amount, CltvExpiry(defaultBlockHeight + 1 + 9), pr.paymentSecret.get), 1, routePrefix = Seq(ChannelHop(nodeParams.nodeId, b, channelUpdate_ab_2)))
     )
     childPayFsm.expectNoMsg(50 millis)
     val childIds = payFsm.stateData.asInstanceOf[PaymentProgress].pending.keys.toSeq
@@ -149,7 +148,7 @@ class MultiPartPaymentLifecycleSpec extends TestKit(ActorSystem("test")) with fi
     val payment = SendPaymentRequest(1000 * 1000 msat, paymentHash, b, 1, paymentRequest = Some(pr))
     // Network statistics should be ignored when sending to peer (otherwise we should have split into multiple payments).
     initPayment(f, payment, emptyStats.copy(capacity = Stats(Seq(100), d => Satoshi(d.toLong))), usableBalances)
-    childPayFsm.expectMsg(SendPayment(paymentHash, b, createMultiPartPayload(payment.amount, payment.amount, CltvExpiry(defaultBlockHeight + 1 + 9), pr.paymentSecret.get), 1, routePrefix = Seq(Hop(nodeParams.nodeId, b, channelUpdate_ab_1))))
+    childPayFsm.expectMsg(SendPayment(paymentHash, b, Onion.createMultiPartPayload(payment.amount, payment.amount, CltvExpiry(defaultBlockHeight + 1 + 9), pr.paymentSecret.get), 1, routePrefix = Seq(ChannelHop(nodeParams.nodeId, b, channelUpdate_ab_1))))
     childPayFsm.expectNoMsg(50 millis)
   }
 
@@ -434,9 +433,9 @@ object MultiPartPaymentLifecycleSpec {
     UsableBalance(c, channelId_ac_3, 1500 * 1000 msat, 0 msat, isPublic = true, channelUpdate_ac_3),
     UsableBalance(d, channelId_ad_1, 1000 * 1000 msat, 0 msat, isPublic = true, channelUpdate_ad_1)))
 
-  val hop_ab_1 = Hop(a, b, channelUpdate_ab_1)
-  val hop_ab_2 = Hop(a, b, channelUpdate_ab_2)
-  val hop_ac_1 = Hop(a, c, channelUpdate_ac_1)
+  val hop_ab_1 = ChannelHop(a, b, channelUpdate_ab_1)
+  val hop_ab_2 = ChannelHop(a, b, channelUpdate_ab_2)
+  val hop_ac_1 = ChannelHop(a, c, channelUpdate_ac_1)
 
   val emptyStats = NetworkStats(0, 0, Stats(Seq(0), d => Satoshi(d.toLong)), Stats(Seq(0), d => CltvExpiryDelta(d.toInt)), Stats(Seq(0), d => MilliSatoshi(d.toLong)), Stats(Seq(0), d => d.toLong))
 

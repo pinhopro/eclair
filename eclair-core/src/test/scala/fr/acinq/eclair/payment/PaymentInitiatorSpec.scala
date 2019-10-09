@@ -22,7 +22,7 @@ import akka.actor.{ActorRef, ActorSystem}
 import akka.testkit.{TestActorRef, TestKit, TestProbe}
 import fr.acinq.bitcoin.Block
 import fr.acinq.eclair.channel.Channel
-import fr.acinq.eclair.payment.HtlcGenerationSpec._
+import fr.acinq.eclair.payment.PaymentPacketSpec._
 import fr.acinq.eclair.payment.PaymentInitiator.SendPaymentRequest
 import fr.acinq.eclair.payment.PaymentLifecycle.{SendPayment, SendPaymentToRoute}
 import fr.acinq.eclair.payment.PaymentRequest.{ExtraHop, Features}
@@ -54,28 +54,28 @@ class PaymentInitiatorSpec extends TestKit(ActorSystem("test")) with fixture.Fun
 
   test("forward payment with pre-defined route") { f =>
     import f._
-    sender.send(initiator, SendPaymentRequest(finalAmountMsat, paymentHash, c, 1, predefinedRoute = Seq(a, b, c)))
+    sender.send(initiator, SendPaymentRequest(finalAmount, paymentHash, c, 1, predefinedRoute = Seq(a, b, c)))
     sender.expectMsgType[UUID]
-    payFsm.expectMsg(SendPaymentToRoute(paymentHash, Seq(a, b, c), FinalLegacyPayload(finalAmountMsat, Channel.MIN_CLTV_EXPIRY_DELTA.toCltvExpiry(nodeParams.currentBlockHeight + 1))))
+    payFsm.expectMsg(SendPaymentToRoute(paymentHash, Seq(a, b, c), FinalLegacyPayload(finalAmount, Channel.MIN_CLTV_EXPIRY_DELTA.toCltvExpiry(nodeParams.currentBlockHeight + 1))))
   }
 
   test("forward legacy payment") { f =>
     import f._
     val hints = Seq(Seq(ExtraHop(b, channelUpdate_bc.shortChannelId, feeBase = 10 msat, feeProportionalMillionths = 1, cltvExpiryDelta = CltvExpiryDelta(12))))
     val routeParams = RouteParams(randomize = true, 15 msat, 1.5, 5, CltvExpiryDelta(561), None)
-    sender.send(initiator, SendPaymentRequest(finalAmountMsat, paymentHash, c, 1, CltvExpiryDelta(42), assistedRoutes = hints, routeParams = Some(routeParams)))
+    sender.send(initiator, SendPaymentRequest(finalAmount, paymentHash, c, 1, CltvExpiryDelta(42), assistedRoutes = hints, routeParams = Some(routeParams)))
     sender.expectMsgType[UUID]
-    payFsm.expectMsg(SendPayment(paymentHash, c, FinalLegacyPayload(finalAmountMsat, CltvExpiryDelta(42).toCltvExpiry(nodeParams.currentBlockHeight + 1)), 1, hints, Some(routeParams)))
+    payFsm.expectMsg(SendPayment(paymentHash, c, FinalLegacyPayload(finalAmount, CltvExpiryDelta(42).toCltvExpiry(nodeParams.currentBlockHeight + 1)), 1, hints, Some(routeParams)))
 
-    sender.send(initiator, SendPaymentRequest(finalAmountMsat, paymentHash, e, 3))
+    sender.send(initiator, SendPaymentRequest(finalAmount, paymentHash, e, 3))
     sender.expectMsgType[UUID]
-    payFsm.expectMsg(SendPayment(paymentHash, e, FinalLegacyPayload(finalAmountMsat, Channel.MIN_CLTV_EXPIRY_DELTA.toCltvExpiry(nodeParams.currentBlockHeight + 1)), 3))
+    payFsm.expectMsg(SendPayment(paymentHash, e, FinalLegacyPayload(finalAmount, Channel.MIN_CLTV_EXPIRY_DELTA.toCltvExpiry(nodeParams.currentBlockHeight + 1)), 3))
   }
 
   test("forward multi-part payment") { f =>
     import f._
-    val pr = PaymentRequest(Block.LivenetGenesisBlock.hash, Some(finalAmountMsat), paymentHash, randomKey, "Some invoice", features = Some(Features(Features.BASIC_MULTI_PART_PAYMENT_OPTIONAL)))
-    val req = SendPaymentRequest(finalAmountMsat + 100.msat, paymentHash, c, 1, CltvExpiryDelta(42), Some(pr))
+    val pr = PaymentRequest(Block.LivenetGenesisBlock.hash, Some(finalAmount), paymentHash, randomKey, "Some invoice", features = Some(Features(Features.BASIC_MULTI_PART_PAYMENT_OPTIONAL)))
+    val req = SendPaymentRequest(finalAmount + 100.msat, paymentHash, c, 1, CltvExpiryDelta(42), Some(pr))
     sender.send(initiator, req)
     sender.expectMsgType[UUID]
     multiPartPayFsm.expectMsg(req)
@@ -83,16 +83,16 @@ class PaymentInitiatorSpec extends TestKit(ActorSystem("test")) with fixture.Fun
 
   test("forward multi-part payment with pre-defined route") { f =>
     import f._
-    val pr = PaymentRequest(Block.LivenetGenesisBlock.hash, Some(finalAmountMsat), paymentHash, randomKey, "Some invoice", features = Some(Features(Features.BASIC_MULTI_PART_PAYMENT_OPTIONAL)))
-    val req = SendPaymentRequest(finalAmountMsat / 2, paymentHash, c, 1, paymentRequest = Some(pr), predefinedRoute = Seq(a, b, c))
+    val pr = PaymentRequest(Block.LivenetGenesisBlock.hash, Some(finalAmount), paymentHash, randomKey, "Some invoice", features = Some(Features(Features.BASIC_MULTI_PART_PAYMENT_OPTIONAL)))
+    val req = SendPaymentRequest(finalAmount / 2, paymentHash, c, 1, paymentRequest = Some(pr), predefinedRoute = Seq(a, b, c))
     sender.send(initiator, req)
     sender.expectMsgType[UUID]
     val msg = payFsm.expectMsgType[SendPaymentToRoute]
     assert(msg.paymentHash === paymentHash)
     assert(msg.hops === Seq(a, b, c))
-    assert(msg.finalPayload.amount === finalAmountMsat / 2)
+    assert(msg.finalPayload.amount === finalAmount / 2)
     assert(msg.finalPayload.paymentSecret === pr.paymentSecret)
-    assert(msg.finalPayload.totalAmount === finalAmountMsat)
+    assert(msg.finalPayload.totalAmount === finalAmount)
   }
 
 }

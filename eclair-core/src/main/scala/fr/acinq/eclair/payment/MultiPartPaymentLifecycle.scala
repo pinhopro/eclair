@@ -255,7 +255,7 @@ object MultiPartPaymentLifecycle {
       request.maxAttempts,
       request.assistedRoutes,
       request.routeParams,
-      Hop(nodeParams.nodeId, channel.remoteNodeId, channel.lastUpdate) :: Nil)
+      ChannelHop(nodeParams.nodeId, channel.remoteNodeId, channel.lastUpdate) :: Nil)
   }
 
   /** Compute the maximum amount we should send in a single child payment. */

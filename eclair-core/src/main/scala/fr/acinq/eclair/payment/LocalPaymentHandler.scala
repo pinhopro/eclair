@@ -21,7 +21,6 @@ import fr.acinq.bitcoin.{ByteVector32, Crypto}
 import fr.acinq.eclair.channel.{CMD_FAIL_HTLC, CMD_FULFILL_HTLC, Channel}
 import fr.acinq.eclair.db.{IncomingPayment, IncomingPaymentStatus}
 import fr.acinq.eclair.payment.PaymentLifecycle.ReceivePayment
-import fr.acinq.eclair.payment.Relayer.FinalPayload
 import fr.acinq.eclair.wire._
 import fr.acinq.eclair.{CltvExpiry, MilliSatoshi, NodeParams, randomBytes32}
 
@@ -64,7 +63,7 @@ class LocalPaymentHandler(nodeParams: NodeParams) extends Actor with ActorLoggin
         case Failure(exception) => sender ! Status.Failure(exception)
       }
 
-    case p: FinalPayload => paymentDb.getIncomingPayment(p.add.paymentHash) match {
+    case p: IncomingPacket.FinalPacket => paymentDb.getIncomingPayment(p.add.paymentHash) match {
       case Some(record) => validatePayment(p, record) match {
         case Some(cmdFail) =>
           sender ! cmdFail
@@ -115,7 +114,7 @@ class LocalPaymentHandler(nodeParams: NodeParams) extends Actor with ActorLoggin
     case GetPendingPayments => sender ! PendingPayments(pendingPayments.keySet)
   }
 
-  private def validatePaymentStatus(payment: FinalPayload, record: IncomingPayment): Boolean = {
+  private def validatePaymentStatus(payment: IncomingPacket.FinalPacket, record: IncomingPayment): Boolean = {
     if (record.status.isInstanceOf[IncomingPaymentStatus.Received]) {
       log.warning(s"ignoring incoming payment for paymentHash=${payment.add.paymentHash} which has already been paid")
       false
@@ -127,7 +126,7 @@ class LocalPaymentHandler(nodeParams: NodeParams) extends Actor with ActorLoggin
     }
   }
 
-  private def validatePaymentAmount(payment: FinalPayload, expectedAmount: MilliSatoshi): Boolean = {
+  private def validatePaymentAmount(payment: IncomingPacket.FinalPacket, expectedAmount: MilliSatoshi): Boolean = {
     // The total amount must be equal or greater than the requested amount. A slight overpaying is permitted, however
     // it must not be greater than two times the requested amount.
     // see https://github.com/lightningnetwork/lightning-rfc/blob/master/04-onion-routing.md#failure-messages
@@ -142,7 +141,7 @@ class LocalPaymentHandler(nodeParams: NodeParams) extends Actor with ActorLoggin
     }
   }
 
-  private def validatePaymentCltv(payment: FinalPayload, minExpiry: CltvExpiry): Boolean = {
+  private def validatePaymentCltv(payment: IncomingPacket.FinalPacket, minExpiry: CltvExpiry): Boolean = {
     if (payment.add.cltvExpiry < minExpiry) {
       log.warning(s"received payment with expiry too small for paymentHash=${payment.add.paymentHash} amount=${payment.add.amountMsat} totalAmount=${payment.payload.totalAmount}")
       false
@@ -151,7 +150,7 @@ class LocalPaymentHandler(nodeParams: NodeParams) extends Actor with ActorLoggin
     }
   }
 
-  private def validateInvoiceFeatures(payment: FinalPayload, pr: PaymentRequest): Boolean = {
+  private def validateInvoiceFeatures(payment: IncomingPacket.FinalPacket, pr: PaymentRequest): Boolean = {
     if (payment.payload.amount < payment.payload.totalAmount && !pr.features.allowMultiPart) {
       log.warning(s"received multi-part payment but invoice doesn't support it for paymentHash=${payment.add.paymentHash} amount=${payment.add.amountMsat} totalAmount=${payment.payload.totalAmount}")
       false
@@ -166,7 +165,7 @@ class LocalPaymentHandler(nodeParams: NodeParams) extends Actor with ActorLoggin
     }
   }
 
-  private def validatePayment(payment: FinalPayload, record: IncomingPayment): Option[CMD_FAIL_HTLC] = {
+  private def validatePayment(payment: IncomingPacket.FinalPacket, record: IncomingPayment): Option[CMD_FAIL_HTLC] = {
     // We send the same error regardless of the failure to avoid probing attacks.
     val cmdFail = CMD_FAIL_HTLC(payment.add.id, Right(IncorrectOrUnknownPaymentDetails(payment.payload.totalAmount, nodeParams.currentBlockHeight)), commit = true)
     val paymentAmountOk = record.paymentRequest.amount.forall(a => validatePaymentAmount(payment, a))
