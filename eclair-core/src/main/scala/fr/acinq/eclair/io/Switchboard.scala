@@ -26,7 +26,7 @@ import fr.acinq.eclair.blockchain.EclairWallet
 import fr.acinq.eclair.channel.Helpers.Closing
 import fr.acinq.eclair.channel.{HasCommitments, _}
 import fr.acinq.eclair.db.PendingRelayDb
-import fr.acinq.eclair.payment.{IncomingPacket, Relayed}
+import fr.acinq.eclair.payment.{IncomingPacket, ChannelRelayed}
 import fr.acinq.eclair.router.Rebroadcast
 import fr.acinq.eclair.transactions.{IN, OUT}
 import fr.acinq.eclair.wire.{TemporaryNodeFailure, UpdateAddHtlc}
@@ -179,7 +179,7 @@ object Switchboard extends Logging {
     // Here we do it differently because we need the origin information.
     val relayed_out = channels
       .flatMap(_.commitments.originChannels.values)
-      .collect { case r: Relayed => r }
+      .collect { case r: ChannelRelayed => r }
       .toSet
 
     val htlcs_broken = htlcs_in.filterNot(htlc_in => relayed_out.exists(r => r.originChannelId == htlc_in.channelId && r.originHtlcId == htlc_in.id))

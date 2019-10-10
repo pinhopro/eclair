@@ -19,14 +19,13 @@ package fr.acinq.eclair.payment
 import java.util.UUID
 
 import akka.actor.{Actor, ActorLogging, ActorRef, Props, Status}
-import akka.event.LoggingAdapter
 import fr.acinq.bitcoin.ByteVector32
 import fr.acinq.bitcoin.Crypto.PublicKey
 import fr.acinq.eclair.channel._
 import fr.acinq.eclair.db.{OutgoingPayment, OutgoingPaymentStatus}
 import fr.acinq.eclair.router.Announcements
 import fr.acinq.eclair.wire._
-import fr.acinq.eclair.{LongToBtcAmount, MilliSatoshi, NodeParams, ShortChannelId, nodeFee}
+import fr.acinq.eclair.{LongToBtcAmount, MilliSatoshi, NodeParams, ShortChannelId}
 import grizzled.slf4j.Logging
 
 import scala.collection.mutable
@@ -34,8 +33,11 @@ import scala.collection.mutable
 // @formatter:off
 sealed trait Origin
 case class Local(id: UUID, sender: Option[ActorRef]) extends Origin // we don't persist reference to local actors
-// TODO: @t-bast: rename to ChannelRelayed and add a new NodeRelayed? Maybe a trait for Relayed?
-case class Relayed(originChannelId: ByteVector32, originHtlcId: Long, amountIn: MilliSatoshi, amountOut: MilliSatoshi) extends Origin
+sealed trait Relayed extends Origin {
+  val amountIn: MilliSatoshi
+  val amountOut: MilliSatoshi
+}
+case class ChannelRelayed(originChannelId: ByteVector32, originHtlcId: Long, amountIn: MilliSatoshi, amountOut: MilliSatoshi) extends Relayed
 
 sealed trait ForwardMessage
 case class ForwardAdd(add: UpdateAddHtlc, previousFailures: Seq[AddHtlcFailed] = Seq.empty) extends ForwardMessage
@@ -53,22 +55,30 @@ case class UsableBalances(balances: Seq[UsableBalance])
 /**
  * Created by PM on 01/02/2017.
  */
+
+/**
+ * The Relayer decrypts incoming HTLCs and relays accordingly:
+ *  - to a payment handler if we are the final recipient
+ *  - to a channel relayer if we are relaying from an upstream channel to a downstream channel
+ *  - to a node relayer if we are relaying a trampoline payment
+ *
+ * It also receives channel HTLC events (fulfill / failed) and relays those to the appropriate handlers.
+ * It also maintains an up-to-date view of local channel balances.
+ */
 class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorRef) extends Actor with ActorLogging {
 
   import Relayer._
-
-  // we pass these to helpers classes so that they have the logging context
-  implicit def implicitLog: LoggingAdapter = log
 
   context.system.eventStream.subscribe(self, classOf[LocalChannelUpdate])
   context.system.eventStream.subscribe(self, classOf[LocalChannelDown])
   context.system.eventStream.subscribe(self, classOf[AvailableBalanceChanged])
 
   private val commandBuffer = context.actorOf(Props(new CommandBuffer(nodeParams, register)))
+  private val channelRelayer = context.actorOf(ChannelRelayer.props(nodeParams, self, register, commandBuffer))
 
   override def receive: Receive = main(Map.empty, new mutable.HashMap[PublicKey, mutable.Set[ShortChannelId]] with mutable.MultiMap[PublicKey, ShortChannelId])
 
-  def main(channelUpdates: Map[ShortChannelId, OutgoingChannel], node2channels: mutable.HashMap[PublicKey, mutable.Set[ShortChannelId]] with mutable.MultiMap[PublicKey, ShortChannelId]): Receive = {
+  def main(channelUpdates: ChannelUpdates, node2channels: NodeChannels): Receive = {
     case GetUsableBalances =>
       sender ! UsableBalances(channelUpdates.values
         .filter(o => Announcements.isEnabled(o.channelUpdate.channelFlags))
@@ -96,7 +106,6 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
       }
       context become main(channelUpdates1, node2channels)
 
-    // TODO: @t-bast: see if we can improve this previousFailures field
     case ForwardAdd(add, previousFailures) =>
       log.debug(s"received forwarding request for htlc #${add.id} paymentHash=${add.paymentHash} from channelId=${add.channelId}")
       IncomingPacket.decrypt(add, nodeParams.privateKey, nodeParams.globalFeatures) match {
@@ -104,14 +113,7 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
           log.debug(s"forwarding htlc #${add.id} paymentHash=${add.paymentHash} to payment-handler")
           paymentHandler forward p
         case Right(r: IncomingPacket.ChannelRelayPacket) =>
-          handleRelay(r, channelUpdates, node2channels, previousFailures, nodeParams.chainHash) match {
-            case RelayFailure(cmdFail) =>
-              log.info(s"rejecting htlc #${add.id} paymentHash=${add.paymentHash} from channelId=${add.channelId} to shortChannelId=${r.payload.outgoingChannelId} reason=${cmdFail.reason}")
-              commandBuffer ! CommandBuffer.CommandSend(add.channelId, add.id, cmdFail)
-            case RelaySuccess(selectedShortChannelId, cmdAdd) =>
-              log.info(s"forwarding htlc #${add.id} paymentHash=${add.paymentHash} from channelId=${add.channelId} to shortChannelId=$selectedShortChannelId")
-              register ! Register.ForwardShortId(selectedShortChannelId, cmdAdd)
-          }
+          channelRelayer forward ChannelRelayer.RelayHtlc(r, previousFailures, channelUpdates, node2channels)
         case Right(r: IncomingPacket.NodeRelayPacket) if !nodeParams.enableTrampolineRouting =>
           log.info(s"rejecting htlc #${add.id} paymentHash=${add.paymentHash} from channelId=${add.channelId} to nodeId=${r.innerPayload.outgoingNodeId} reason=trampoline disabled")
           commandBuffer ! CommandBuffer.CommandSend(add.channelId, add.id, CMD_FAIL_HTLC(add.id, Right(RequiredNodeFeatureMissing), commit = true))
@@ -129,11 +131,6 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
           commandBuffer ! CommandBuffer.CommandSend(add.channelId, add.id, cmdFail)
       }
 
-    case Status.Failure(Register.ForwardShortIdFailure(Register.ForwardShortId(shortChannelId, CMD_ADD_HTLC(_, _, _, _, Right(add), _, _)))) =>
-      log.warning(s"couldn't resolve downstream channel $shortChannelId, failing htlc #${add.id}")
-      val cmdFail = CMD_FAIL_HTLC(add.id, Right(UnknownNextPeer), commit = true)
-      commandBuffer ! CommandBuffer.CommandSend(add.channelId, add.id, cmdFail)
-
     case Status.Failure(addFailed: AddHtlcFailed) =>
       import addFailed.paymentHash
       addFailed.origin match {
@@ -141,18 +138,8 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
           handleLocalPaymentAfterRestart(PaymentFailed(id, paymentHash, Nil))
         case Local(_, Some(sender)) =>
           sender ! Status.Failure(addFailed)
-        case Relayed(originChannelId, originHtlcId, _, _) =>
-          addFailed.originalCommand match {
-            case Some(cmd) =>
-              log.info(s"retrying htlc #$originHtlcId paymentHash=$paymentHash from channelId=$originChannelId")
-              // NB: cmd.upstream.right is defined since this is a relayed payment
-              self ! ForwardAdd(cmd.upstream.right.get, cmd.previousFailures :+ addFailed)
-            case None =>
-              val failure = translateError(addFailed)
-              val cmdFail = CMD_FAIL_HTLC(originHtlcId, Right(failure), commit = true)
-              log.info(s"rejecting htlc #$originHtlcId paymentHash=$paymentHash from channelId=$originChannelId reason=${cmdFail.reason}")
-              commandBuffer ! CommandBuffer.CommandSend(originChannelId, originHtlcId, cmdFail)
-          }
+        case _: ChannelRelayed =>
+          channelRelayer forward Status.Failure(addFailed)
       }
 
     case ForwardFulfill(fulfill, to, add) =>
@@ -162,7 +149,7 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
           handleLocalPaymentAfterRestart(PaymentSent(id, add.paymentHash, fulfill.paymentPreimage, Seq(PaymentSent.PartialPayment(id, add.amountMsat, feesPaid, add.channelId, None))))
         case Local(_, Some(sender)) =>
           sender ! fulfill
-        case Relayed(originChannelId, originHtlcId, amountIn, amountOut) =>
+        case ChannelRelayed(originChannelId, originHtlcId, amountIn, amountOut) =>
           val cmd = CMD_FULFILL_HTLC(originHtlcId, fulfill.paymentPreimage, commit = true)
           commandBuffer ! CommandBuffer.CommandSend(originChannelId, originHtlcId, cmd)
           context.system.eventStream.publish(PaymentRelayed(amountIn, amountOut, add.paymentHash, fromChannelId = originChannelId, toChannelId = fulfill.channelId))
@@ -174,7 +161,7 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
           handleLocalPaymentAfterRestart(PaymentFailed(id, add.paymentHash, Nil))
         case Local(_, Some(sender)) =>
           sender ! fail
-        case Relayed(originChannelId, originHtlcId, _, _) =>
+        case ChannelRelayed(originChannelId, originHtlcId, _, _) =>
           val cmd = CMD_FAIL_HTLC(originHtlcId, Left(fail.reason), commit = true)
           commandBuffer ! CommandBuffer.CommandSend(originChannelId, originHtlcId, cmd)
       }
@@ -185,7 +172,7 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
           handleLocalPaymentAfterRestart(PaymentFailed(id, add.paymentHash, Nil))
         case Local(_, Some(sender)) =>
           sender ! fail
-        case Relayed(originChannelId, originHtlcId, _, _) =>
+        case ChannelRelayed(originChannelId, originHtlcId, _, _) =>
           val cmd = CMD_FAIL_MALFORMED_HTLC(originHtlcId, fail.onionHash, fail.failureCode, commit = true)
           commandBuffer ! CommandBuffer.CommandSend(originChannelId, originHtlcId, cmd)
       }
@@ -229,136 +216,12 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
 }
 
 object Relayer extends Logging {
+
   def props(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorRef) = Props(classOf[Relayer], nodeParams, register, paymentHandler)
 
+  type ChannelUpdates = Map[ShortChannelId, OutgoingChannel]
+  type NodeChannels = mutable.HashMap[PublicKey, mutable.Set[ShortChannelId]] with mutable.MultiMap[PublicKey, ShortChannelId]
+
   case class OutgoingChannel(nextNodeId: PublicKey, channelUpdate: ChannelUpdate, commitments: Commitments)
-
-  // @formatter:off
-  sealed trait RelayResult
-  case class RelayFailure(cmdFail: CMD_FAIL_HTLC) extends RelayResult
-  case class RelaySuccess(shortChannelId: ShortChannelId, cmdAdd: CMD_ADD_HTLC) extends RelayResult
-  // @formatter:on
-
-  /**
-   * Handle an incoming htlc when we are a relaying node.
-   *
-   * @return either:
-   *         - a CMD_FAIL_HTLC to be sent back upstream
-   *         - a CMD_ADD_HTLC to propagate downstream
-   */
-  def handleRelay(relayPacket: IncomingPacket.ChannelRelayPacket, channelUpdates: Map[ShortChannelId, OutgoingChannel], node2channels: mutable.Map[PublicKey, mutable.Set[ShortChannelId]] with mutable.MultiMap[PublicKey, ShortChannelId], previousFailures: Seq[AddHtlcFailed], chainHash: ByteVector32)(implicit log: LoggingAdapter): RelayResult = {
-    import relayPacket._
-    log.info(s"relaying htlc #${add.id} paymentHash={} from channelId={} to requestedShortChannelId={} previousAttempts={}", add.paymentHash, add.channelId, payload.outgoingChannelId, previousFailures.size)
-    val alreadyTried = previousFailures.flatMap(_.channelUpdate).map(_.shortChannelId)
-    selectPreferredChannel(relayPacket, channelUpdates, node2channels, alreadyTried)
-      .flatMap(selectedShortChannelId => channelUpdates.get(selectedShortChannelId).map(_.channelUpdate)) match {
-      case None if previousFailures.nonEmpty =>
-        // no more channels to try
-        val error = previousFailures
-          // we return the error for the initially requested channel if it exists
-          .find(_.channelUpdate.map(_.shortChannelId).contains(payload.outgoingChannelId))
-          // otherwise we return the error for the first channel tried
-          .getOrElse(previousFailures.head)
-        RelayFailure(CMD_FAIL_HTLC(add.id, Right(translateError(error)), commit = true))
-      case channelUpdate_opt =>
-        relayOrFail(relayPacket, channelUpdate_opt, previousFailures)
-    }
-  }
-
-  /**
-   * Select a channel to the same node to relay the payment to, that has the lowest balance and is compatible in
-   * terms of fees, expiry_delta, etc.
-   *
-   * If no suitable channel is found we default to the originally requested channel.
-   */
-  def selectPreferredChannel(relayPacket: IncomingPacket.ChannelRelayPacket, channelUpdates: Map[ShortChannelId, OutgoingChannel], node2channels: mutable.Map[PublicKey, mutable.Set[ShortChannelId]] with mutable.MultiMap[PublicKey, ShortChannelId], alreadyTried: Seq[ShortChannelId])(implicit log: LoggingAdapter): Option[ShortChannelId] = {
-    import relayPacket.add
-    val requestedShortChannelId = relayPacket.payload.outgoingChannelId
-    log.debug(s"selecting next channel for htlc #${add.id} paymentHash={} from channelId={} to requestedShortChannelId={} previousAttempts={}", add.paymentHash, add.channelId, requestedShortChannelId, alreadyTried.size)
-    // first we find out what is the next node
-    val nextNodeId_opt = channelUpdates.get(requestedShortChannelId) match {
-      case Some(OutgoingChannel(nextNodeId, _, _)) =>
-        Some(nextNodeId)
-      case None => None
-    }
-    nextNodeId_opt match {
-      case Some(nextNodeId) =>
-        log.debug(s"next hop for htlc #{} paymentHash={} is nodeId={}", add.id, add.paymentHash, nextNodeId)
-        // then we retrieve all known channels to this node
-        val allChannels = node2channels.getOrElse(nextNodeId, Set.empty[ShortChannelId])
-        // we then filter out channels that we have already tried
-        val candidateChannels = allChannels -- alreadyTried
-        // and we filter keep the ones that are compatible with this payment (mainly fees, expiry delta)
-        candidateChannels
-          .map { shortChannelId =>
-            val channelInfo_opt = channelUpdates.get(shortChannelId)
-            val channelUpdate_opt = channelInfo_opt.map(_.channelUpdate)
-            val relayResult = relayOrFail(relayPacket, channelUpdate_opt)
-            log.debug(s"candidate channel for htlc #${add.id} paymentHash=${add.paymentHash}: shortChannelId={} balanceMsat={} channelUpdate={} relayResult={}", shortChannelId, channelInfo_opt.map(_.commitments.availableBalanceForSend).getOrElse(""), channelUpdate_opt.getOrElse(""), relayResult)
-            (shortChannelId, channelInfo_opt, relayResult)
-          }
-          .collect { case (shortChannelId, Some(channelInfo), _: RelaySuccess) => (shortChannelId, channelInfo.commitments.availableBalanceForSend) }
-          .filter(_._2 > relayPacket.payload.amountToForward) // we only keep channels that have enough balance to handle this payment
-          .toList // needed for ordering
-          .sortBy(_._2) // we want to use the channel with the lowest available balance that can process the payment
-          .headOption match {
-          case Some((preferredShortChannelId, availableBalanceMsat)) if preferredShortChannelId != requestedShortChannelId =>
-            log.info("replacing requestedShortChannelId={} by preferredShortChannelId={} with availableBalanceMsat={}", requestedShortChannelId, preferredShortChannelId, availableBalanceMsat)
-            Some(preferredShortChannelId)
-          case Some(_) =>
-            // the requested short_channel_id is already our preferred channel
-            Some(requestedShortChannelId)
-          case None if !alreadyTried.contains(requestedShortChannelId) =>
-            // no channel seem to work for this payment, we keep the requested channel id
-            Some(requestedShortChannelId)
-          case None =>
-            // no channel seem to work for this payment and we have already tried the requested channel id: we give up
-            None
-        }
-      case _ => Some(requestedShortChannelId) // we don't have a channel_update for this short_channel_id
-    }
-  }
-
-  /**
-   * This helper method will tell us if it is not even worth attempting to relay the payment to our local outgoing
-   * channel, because some parameters don't match with our settings for that channel. In that case we directly fail the
-   * htlc.
-   */
-  def relayOrFail(relayPacket: IncomingPacket.ChannelRelayPacket, channelUpdate_opt: Option[ChannelUpdate], previousFailures: Seq[AddHtlcFailed] = Seq.empty): RelayResult = {
-    import relayPacket._
-    channelUpdate_opt match {
-      case None =>
-        RelayFailure(CMD_FAIL_HTLC(add.id, Right(UnknownNextPeer), commit = true))
-      case Some(channelUpdate) if !Announcements.isEnabled(channelUpdate.channelFlags) =>
-        RelayFailure(CMD_FAIL_HTLC(add.id, Right(ChannelDisabled(channelUpdate.messageFlags, channelUpdate.channelFlags, channelUpdate)), commit = true))
-      case Some(channelUpdate) if payload.amountToForward < channelUpdate.htlcMinimumMsat =>
-        RelayFailure(CMD_FAIL_HTLC(add.id, Right(AmountBelowMinimum(payload.amountToForward, channelUpdate)), commit = true))
-      case Some(channelUpdate) if relayPacket.expiryDelta != channelUpdate.cltvExpiryDelta =>
-        RelayFailure(CMD_FAIL_HTLC(add.id, Right(IncorrectCltvExpiry(payload.outgoingCltv, channelUpdate)), commit = true))
-      case Some(channelUpdate) if relayPacket.relayFeeMsat < nodeFee(channelUpdate.feeBaseMsat, channelUpdate.feeProportionalMillionths, payload.amountToForward) =>
-        RelayFailure(CMD_FAIL_HTLC(add.id, Right(FeeInsufficient(add.amountMsat, channelUpdate)), commit = true))
-      case Some(channelUpdate) =>
-        RelaySuccess(channelUpdate.shortChannelId, CMD_ADD_HTLC(payload.amountToForward, add.paymentHash, payload.outgoingCltv, nextPacket, upstream = Right(add), commit = true, previousFailures = previousFailures))
-    }
-  }
-
-  /**
-   * This helper method translates relaying errors (returned by the downstream outgoing channel) to BOLT 4 standard
-   * errors that we should return upstream.
-   */
-  private def translateError(failure: AddHtlcFailed): FailureMessage = {
-    val error = failure.t
-    val channelUpdate_opt = failure.channelUpdate
-    (error, channelUpdate_opt) match {
-      case (_: ExpiryTooSmall, Some(channelUpdate)) => ExpiryTooSoon(channelUpdate)
-      case (_: ExpiryTooBig, _) => ExpiryTooFar
-      case (_: InsufficientFunds, Some(channelUpdate)) => TemporaryChannelFailure(channelUpdate)
-      case (_: TooManyAcceptedHtlcs, Some(channelUpdate)) => TemporaryChannelFailure(channelUpdate)
-      case (_: ChannelUnavailable, Some(channelUpdate)) if !Announcements.isEnabled(channelUpdate.channelFlags) => ChannelDisabled(channelUpdate.messageFlags, channelUpdate.channelFlags, channelUpdate)
-      case (_: ChannelUnavailable, None) => PermanentChannelFailure
-      case (_: HtlcTimedout, _) => PermanentChannelFailure
-      case _ => TemporaryNodeFailure
-    }
-  }
 
 }

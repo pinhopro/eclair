@@ -23,7 +23,7 @@ import fr.acinq.bitcoin.DeterministicWallet.{ExtendedPrivateKey, KeyPath}
 import fr.acinq.bitcoin.{ByteVector32, ByteVector64, Crypto, OutPoint, Transaction, TxOut}
 import fr.acinq.eclair.channel._
 import fr.acinq.eclair.crypto.ShaChain
-import fr.acinq.eclair.payment.{Local, Origin, Relayed}
+import fr.acinq.eclair.payment.{Local, Origin, ChannelRelayed}
 import fr.acinq.eclair.transactions.Transactions._
 import fr.acinq.eclair.transactions._
 import fr.acinq.eclair.wire.CommonCodecs._
@@ -184,11 +184,11 @@ object ChannelCodecs extends Logging {
       ("sender" | provide(Option.empty[ActorRef]))
     ).as[Local]
 
-  val relayedCodec: Codec[Relayed] = (
+  val channelRelayedCodec: Codec[ChannelRelayed] = (
     ("originChannelId" | bytes32) ::
       ("originHtlcId" | int64) ::
       ("amountIn" | millisatoshi) ::
-      ("amountOut" | millisatoshi)).as[Relayed]
+      ("amountOut" | millisatoshi)).as[ChannelRelayed]
 
   // this is for backward compatibility to handle legacy payments that didn't have identifiers
   val UNKNOWN_UUID = UUID.fromString("00000000-0000-0000-0000-000000000000")
@@ -196,7 +196,7 @@ object ChannelCodecs extends Logging {
   val originCodec: Codec[Origin] = discriminated[Origin].by(uint16)
     .typecase(0x03, localCodec) // backward compatible
     .typecase(0x01, provide(Local(UNKNOWN_UUID, None)))
-    .typecase(0x02, relayedCodec)
+    .typecase(0x02, channelRelayedCodec)
 
   val originsListCodec: Codec[List[(Long, Origin)]] = listOfN(uint16, int64 ~ originCodec)
 

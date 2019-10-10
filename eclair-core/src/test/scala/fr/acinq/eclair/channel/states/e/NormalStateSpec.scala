@@ -109,7 +109,7 @@ class NormalStateSpec extends TestkitBaseClass with StateTestsHelperMethods {
       commitments = initialState.commitments.copy(
         localNextHtlcId = 1,
         localChanges = initialState.commitments.localChanges.copy(proposed = htlc :: Nil),
-        originChannels = Map(0L -> Relayed(originHtlc.channelId, originHtlc.id, originHtlc.amountMsat, htlc.amountMsat))
+        originChannels = Map(0L -> ChannelRelayed(originHtlc.channelId, originHtlc.id, originHtlc.amountMsat, htlc.amountMsat))
       )))
   }
 
