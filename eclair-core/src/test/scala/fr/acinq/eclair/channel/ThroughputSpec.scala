@@ -65,8 +65,8 @@ class ThroughputSpec extends FunSuite {
     }), "payment-handler")
     val registerA = TestProbe()
     val registerB = TestProbe()
-    val relayerA = system.actorOf(Relayer.props(Alice.nodeParams, registerA.ref, paymentHandler))
-    val relayerB = system.actorOf(Relayer.props(Bob.nodeParams, registerB.ref, paymentHandler))
+    val relayerA = system.actorOf(Relayer.props(Alice.nodeParams, TestProbe().ref, registerA.ref, paymentHandler))
+    val relayerB = system.actorOf(Relayer.props(Bob.nodeParams, TestProbe().ref, registerB.ref, paymentHandler))
     val wallet = new TestWallet
     val alice = system.actorOf(Channel.props(Alice.nodeParams, wallet, Bob.nodeParams.nodeId, blockchain, ???, relayerA, None), "a")
     val bob = system.actorOf(Channel.props(Bob.nodeParams, wallet, Alice.nodeParams.nodeId, blockchain, ???, relayerB, None), "b")

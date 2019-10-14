@@ -43,16 +43,16 @@ class RelayerSpec extends TestkitBaseClass {
 
   import PaymentPacketSpec._
 
-  case class FixtureParam(nodeParams: NodeParams, relayer: ActorRef, register: TestProbe, paymentHandler: TestProbe, sender: TestProbe)
+  case class FixtureParam(nodeParams: NodeParams, relayer: ActorRef, router: TestProbe, register: TestProbe, paymentHandler: TestProbe, sender: TestProbe)
 
   override def withFixture(test: OneArgTest): Outcome = {
     within(30 seconds) {
       val nodeParams = TestConstants.Bob.nodeParams
-      val register = TestProbe()
+      val (router, register) = (TestProbe(), TestProbe())
       val paymentHandler = TestProbe()
       // we are node B in the route A -> B -> C -> ....
-      val relayer = system.actorOf(Relayer.props(nodeParams, register.ref, paymentHandler.ref))
-      withFixture(test.toNoArgTest(FixtureParam(nodeParams, relayer, register, paymentHandler, TestProbe())))
+      val relayer = system.actorOf(Relayer.props(nodeParams, router.ref, register.ref, paymentHandler.ref))
+      withFixture(test.toNoArgTest(FixtureParam(nodeParams, relayer, router, register, paymentHandler, TestProbe())))
     }
   }
 
@@ -316,7 +316,7 @@ class RelayerSpec extends TestkitBaseClass {
     import f._
 
     val nodeParams = TestConstants.Bob.nodeParams.copy(enableTrampolineRouting = false)
-    val relayer = system.actorOf(Relayer.props(nodeParams, register.ref, paymentHandler.ref))
+    val relayer = system.actorOf(Relayer.props(nodeParams, router.ref, register.ref, paymentHandler.ref))
 
     // we use this to build a valid trampoline onion inside a normal onion
     val trampolineHops = NodeHop(a, b, channelUpdate_ab.cltvExpiryDelta, 0 msat) :: NodeHop(b, c, channelUpdate_bc.cltvExpiryDelta, fee_b) :: Nil

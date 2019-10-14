@@ -65,7 +65,7 @@ case class UsableBalances(balances: Seq[UsableBalance])
  * It also receives channel HTLC events (fulfill / failed) and relays those to the appropriate handlers.
  * It also maintains an up-to-date view of local channel balances.
  */
-class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorRef) extends Actor with ActorLogging {
+class Relayer(nodeParams: NodeParams, router: ActorRef, register: ActorRef, paymentHandler: ActorRef) extends Actor with ActorLogging {
 
   import Relayer._
 
@@ -75,6 +75,7 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
 
   private val commandBuffer = context.actorOf(Props(new CommandBuffer(nodeParams, register)))
   private val channelRelayer = context.actorOf(ChannelRelayer.props(nodeParams, self, register, commandBuffer))
+  private val nodeRelayer = context.actorOf(NodeRelayer.props(nodeParams, router, commandBuffer, register))
 
   override def receive: Receive = main(Map.empty, new mutable.HashMap[PublicKey, mutable.Set[ShortChannelId]] with mutable.MultiMap[PublicKey, ShortChannelId])
 
@@ -106,6 +107,8 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
       }
       context become main(channelUpdates1, node2channels)
 
+    // TODO: @t-bast: at some point draw the message flow between all payment components?
+
     case ForwardAdd(add, previousFailures) =>
       log.debug(s"received forwarding request for htlc #${add.id} paymentHash=${add.paymentHash} from channelId=${add.channelId}")
       IncomingPacket.decrypt(add, nodeParams.privateKey, nodeParams.globalFeatures) match {
@@ -117,9 +120,8 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
         case Right(r: IncomingPacket.NodeRelayPacket) if !nodeParams.enableTrampolineRouting =>
           log.info(s"rejecting htlc #${add.id} paymentHash=${add.paymentHash} from channelId=${add.channelId} to nodeId=${r.innerPayload.outgoingNodeId} reason=trampoline disabled")
           commandBuffer ! CommandBuffer.CommandSend(add.channelId, add.id, CMD_FAIL_HTLC(add.id, Right(RequiredNodeFeatureMissing), commit = true))
-        case Right(_: IncomingPacket.NodeRelayPacket) =>
-          // TODO: @t-bast: relay trampoline payload
-          ???
+        case Right(r: IncomingPacket.NodeRelayPacket) =>
+          nodeRelayer forward r
         case Left(badOnion: BadOnion) =>
           log.warning(s"couldn't parse onion: reason=${badOnion.message}")
           val cmdFail = CMD_FAIL_MALFORMED_HTLC(add.id, badOnion.onionHash, badOnion.code, commit = true)
@@ -217,7 +219,7 @@ class Relayer(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorR
 
 object Relayer extends Logging {
 
-  def props(nodeParams: NodeParams, register: ActorRef, paymentHandler: ActorRef) = Props(classOf[Relayer], nodeParams, register, paymentHandler)
+  def props(nodeParams: NodeParams, router: ActorRef, register: ActorRef, paymentHandler: ActorRef) = Props(classOf[Relayer], nodeParams, router, register, paymentHandler)
 
   type ChannelUpdates = Map[ShortChannelId, OutgoingChannel]
   type NodeChannels = mutable.HashMap[PublicKey, mutable.Set[ShortChannelId]] with mutable.MultiMap[PublicKey, ShortChannelId]

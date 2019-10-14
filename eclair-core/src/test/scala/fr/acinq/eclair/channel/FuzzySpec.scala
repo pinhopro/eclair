@@ -56,8 +56,8 @@ class FuzzySpec extends TestkitBaseClass with StateTestsHelperMethods with Loggi
     val paymentHandlerB = system.actorOf(Props(new LocalPaymentHandler(Bob.nodeParams)))
     val registerA = TestProbe()
     val registerB = TestProbe()
-    val relayerA = system.actorOf(Relayer.props(Alice.nodeParams, registerA.ref, paymentHandlerA))
-    val relayerB = system.actorOf(Relayer.props(Bob.nodeParams, registerB.ref, paymentHandlerB))
+    val relayerA = system.actorOf(Relayer.props(Alice.nodeParams, TestProbe().ref, registerA.ref, paymentHandlerA))
+    val relayerB = system.actorOf(Relayer.props(Bob.nodeParams, TestProbe().ref, registerB.ref, paymentHandlerB))
     val router = TestProbe()
     val wallet = new TestWallet
     val alice: TestFSMRef[State, Data, Channel] = TestFSMRef(new Channel(Alice.nodeParams, wallet, Bob.nodeParams.nodeId, alice2blockchain.ref, router.ref, relayerA))
